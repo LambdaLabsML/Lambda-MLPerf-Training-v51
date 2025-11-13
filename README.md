@@ -13,8 +13,12 @@ Password: <enter NGC password>
 ```
 Once you have gotten access to the containers, you must pull the latest container for your respective model
 ```bash
-export CONT=<container name>    # I.e. the latest container for llama2 70b LoRa at the time of writing is at nvcr.io/nvdlfwea/mlperftv51/llama2_70b_lora-amd:20251008
+export CONT=<container name>
 docker pull $CONT
+
+# I.e. the latest container for llama2 70b LoRa at the time of writing is at nvcr.io/nvdlfwea/mlperftv51/llama2_70b_lora-amd:20251008
+# I.e. the latest container for llama3 8B at the time of writing is at nvcr.io/nvdlfwea/mlperftv51/llama31_8b-amd:20251008
+# I.e. the latest container for Flux1 at the time of writing is at nvcr.io/nvdlfwea/mlperftv51/flux1-amd:20251007
 ```
 
 This will pull the docker container that will be used to run the benchmark
@@ -31,6 +35,39 @@ python scripts/download_model.py --model_dir /data/model        # Downloads and 
 exit
 ```
 
+For llama3 8b, follow instead the preprocessing steps at https://github.com/mlcommons/training/tree/master/small_llm_pretraining/nemo#preprocessed-data-download. Then, do:
+```bash
+mv llama3_1_8b_preprocessed_c4_dataset 8b
+mv llama3_1_8b_tokenizer 8b/tokenizer
+```
+
+For Flux1, this would instead look like:
+```bash
+docker run -it --rm --gpus all --network=host --ipc=host --volume <path you want to download dataset + model to>:/dataset $CONT
+pip install datasets
+
+cd /dataset
+bash <(curl -s https://raw.githubusercontent.com/mlcommons/r2-downloader/refs/heads/main/mlc-r2-downloader.sh) https://training.mlcommons-storage.org/metadata/flux-1-cc12m-preprocessed.uri
+bash <(curl -s https://raw.githubusercontent.com/mlcommons/r2-downloader/refs/heads/main/mlc-r2-downloader.sh) https://training.mlcommons-storage.org/metadata/flux-1-coco-preprocessed.uri
+bash <(curl -s https://raw.githubusercontent.com/mlcommons/r2-downloader/refs/heads/main/mlc-r2-downloader.sh) https://training.mlcommons-storage.org/metadata/flux-1-empty-encodings.uri
+
+# convert to webdataset format
+mkdir energon
+python /workspace/flux/scripts/to_webdataset.py --input_path /dataset/cc12m_preprocessed --output_path /dataset/energon/train --num_workers 8
+python /workspace/flux/scripts/to_webdataset.py --input_path /dataset/coco_preprocessed --output_path /dataset/energon/val --num_workers 8
+
+# prepare energon metadata
+cd energon
+energon prepare --split-parts 'train:train/.*' --split-parts 'val:val/.*' ./
+# Select y for duplicate keys
+# Select y for creadint interactively
+# Select class 11
+
+# copy over empty_encodings
+cp -r ../empty_encodings .
+exit
+```
+
 ### 3) Get the config files appropriate for your system setup
 MLCommons provides optimized configuration files for several different system setups. For our general purpose guide, we will copy all of the provided 
 config files over to our shared storage so that we have access to anything that is needed. First, we will go back into the docker container with a 
@@ -40,6 +77,17 @@ that runs that actual training, and exit the docker container.
 docker run -it --rm --network=host --ipc=host --volume <path you want to keep config files + run.sub file at>:/mounted $CONT
 cp /workspace/ft-llm/config_*.sh /mounted/ && chmod 664 /mounted/config_*.sh      # Copies all the config files and changes their permissions so we can read from them and source them
 cp /workspace/ft-llm/run.sub /mounted/ && chmod 775 /mounted/run.sub          # Copies over run.sub file to run the traininga dn changes permissions so we can run it
+exit
+```
+
+For llama3 8b, you actually have to run the training command in the docker container. So, no need to move config files anywhere here!
+
+
+For Flux1, this would look like the following:
+```bash
+docker run -it --rm --network=host --ipc=host --volume <path you want to keep config files + run.sub file at>:/mounted $CONT
+cp /workspace/flux/config_*.sh /mounted/ && chmod 664 /mounted/config_*.sh  # extract config files and set their permissions
+cp /workspace/flux/run.sub /mounted/ && chmod 775 /mounted/run.sub  # extract batch script and set its permissions
 exit
 ```
 
@@ -57,6 +105,25 @@ export LOGDIR="</path/to/output_logdir>"  # set the place where the output logs 
 export CONT=</url/to/container>  # set the container (should have been set before, but no hurt in double-checking)
 source config_<system>.sh  # For example if we were using the B200s, we would choose the config_DGXB200_...sh that runs the model the quickest
 sbatch -N $DGXNNODES -t $WALLTIME run.sub
+```
+
+
+For llama3 8b, it looks like this instead:
+```bash
+export DATADIR="<path/to/the/download/dir>"    # For llama3 8b, set DATADIR to where 8b is stored, but not including the 8b/ in the path
+export LOGDIR=</path/to/output/dir>  # set the place where the output logs will be saved
+export CONT=<docker/registry>/mlperf-nvidia:llama31_8b-pyt
+source config_GB200_2x4x4xtp1pp1cp1_8b.sh  # select config and source it
+sbatch -N ${DGXNNODES} --time=${WALLTIME} run.sub  # you may be required to set --account and --partition here
+```
+
+Finally, for Flux, it looks like this:
+```bash
+export DATAROOT="</path/to/dataset>/energon"  # set your </path/to/dataset>
+export LOGDIR="</path/to/output_logdir>"  # set the place where the output logs will be saved
+export CONT=</url/to/container>  # set the container url
+source config_<system>.sh  # select config and source it
+sbatch -N $DGXNNODES -t $WALLTIME run.sub  # you may be required to set --account and --partition here
 ```
 
 That is all! The NGC containers with the step-by-step process for each model can be found at https://registry.ngc.nvidia.com.
